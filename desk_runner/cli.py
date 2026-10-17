@@ -17,6 +17,11 @@ from desk_runner.config import (
     upstream_config,
 )
 from desk_runner.finalize import FinalizeError, finalize
+from desk_runner.memory_bridge import (
+    MemoryBridgeError,
+    pending_reflections,
+    settle_reflections,
+)
 from desk_runner.nodes import NodeError, apply_answer, build_prompt, next_nodes
 from desk_runner.state_store import StateError, load_state
 from desk_runner.tools_bridge import ToolBridgeError, run_tool
@@ -174,3 +179,35 @@ def finalize_command(ctx: typer.Context, date: DateOption = None) -> None:
             typer.echo(f"{decision.symbol} order {decision.order.side} {decision.order.qty}")
         else:
             typer.echo(f"{decision.symbol} {decision.status}: {decision.reason}")
+
+
+memory_app = typer.Typer(help="Memory: reflections on settled decisions, written by sub-agents.")
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("pending")
+def memory_pending_command(ctx: typer.Context, date: DateOption = None) -> None:
+    """Write the reflection prompts for decisions whose window has traded; entries stay pending."""
+    config: DeskConfig = ctx.obj.config
+    paths: Paths = ctx.obj.paths
+    trade_date = date or today_ny()
+    try:
+        prompts = pending_reflections(paths, config, trade_date)
+    except MemoryBridgeError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps({"prompts": [str(prompt) for prompt in prompts]}))
+
+
+@memory_app.command("settle")
+def memory_settle_command(ctx: typer.Context, date: DateOption = None) -> None:
+    """Settle pending decisions that have a sub-agent's answer for their reflection prompt."""
+    config: DeskConfig = ctx.obj.config
+    paths: Paths = ctx.obj.paths
+    trade_date = date or today_ny()
+    try:
+        settled = settle_reflections(paths, config, trade_date)
+    except MemoryBridgeError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps({"settled": [{"ticker": t, "date": d} for t, d in settled]}))

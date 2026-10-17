@@ -1,5 +1,6 @@
 """`ma` command line: the desk runner's entry point for the scheduled task."""
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated
@@ -15,6 +16,8 @@ from desk_runner.config import (
     today_ny,
     upstream_config,
 )
+from desk_runner.nodes import NodeError, apply_answer, build_prompt, next_nodes
+from desk_runner.state_store import StateError, load_state
 from tradingagents.dataflows.config import set_config
 
 app = typer.Typer(help="Desk runner: TradingAgents research and paper-trading desk.")
@@ -58,3 +61,63 @@ def log(
     stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     with (run_dir / "timing.log").open("a") as handle:
         handle.write(f"{stamp} {message}\n")
+
+
+SymbolArgument = Annotated[str, typer.Argument(help="Symbol, e.g. AAPL.")]
+NodeArgument = Annotated[str, typer.Argument(help="Upstream node key, e.g. bull or trader.")]
+
+
+@app.command("next")
+def next_command(ctx: typer.Context, symbol: SymbolArgument, date: DateOption = None) -> None:
+    """List the upstream nodes that run next for the symbol's state."""
+    config: DeskConfig = ctx.obj.config
+    paths: Paths = ctx.obj.paths
+    trade_date = date or today_ny()
+    try:
+        nodes = next_nodes(load_state(paths, trade_date, symbol), config)
+    except StateError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps({"nodes": nodes, "done": not nodes}))
+
+
+@app.command("prompt")
+def prompt_command(
+    ctx: typer.Context,
+    symbol: SymbolArgument,
+    node: NodeArgument,
+    date: DateOption = None,
+) -> None:
+    """Write the prompt the upstream node would send next as a turn for a sub-agent."""
+    config: DeskConfig = ctx.obj.config
+    paths: Paths = ctx.obj.paths
+    trade_date = date or today_ny()
+    try:
+        prompt_file = build_prompt(paths, trade_date, symbol, node, config)
+    except (NodeError, StateError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(prompt_file.model_dump_json())
+
+
+@app.command("apply")
+def apply_command(
+    ctx: typer.Context,
+    symbol: SymbolArgument,
+    node: NodeArgument,
+    date: DateOption = None,
+    freetext: Annotated[
+        bool,
+        typer.Option("--freetext", help="Take the node's free-text path with the answer as its text."),
+    ] = False,
+) -> None:
+    """Replay the sub-agent's answer for the pending turn through the upstream node."""
+    config: DeskConfig = ctx.obj.config
+    paths: Paths = ctx.obj.paths
+    trade_date = date or today_ny()
+    try:
+        state = apply_answer(paths, trade_date, symbol, node, config, freetext=freetext)
+    except (NodeError, StateError) as exc:
+        typer.echo(json.dumps({"ok": False, "error": str(exc)}))
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps({"ok": True, "next": next_nodes(state, config)}))

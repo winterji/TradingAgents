@@ -1,6 +1,7 @@
 """Config loading, the Paths helper and the CLI's startup guard."""
 
 import json
+import re
 from copy import deepcopy
 from pathlib import Path
 
@@ -152,7 +153,9 @@ def test_log_appends_to_timing_log(monkeypatch, tmp_path):
     assert len(lines) == 2
     assert lines[0].endswith("Z first")
     assert lines[1].endswith("Z second")
-    assert lines[0].startswith("2026-10-17T")
+    stamp = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ")
+    assert stamp.match(lines[0])
+    assert stamp.match(lines[1])
 
 
 def test_write_json_atomic_replaces_file(tmp_path):

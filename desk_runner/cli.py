@@ -16,6 +16,7 @@ from desk_runner.config import (
     today_ny,
     upstream_config,
 )
+from desk_runner.finalize import FinalizeError, finalize
 from desk_runner.nodes import NodeError, apply_answer, build_prompt, next_nodes
 from desk_runner.state_store import StateError, load_state
 from desk_runner.tools_bridge import ToolBridgeError, run_tool
@@ -155,3 +156,21 @@ def tool_command(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(output)
+
+
+@app.command("finalize")
+def finalize_command(ctx: typer.Context, date: DateOption = None) -> None:
+    """Write the day's decision file, queue its orders as pending fills and log the decisions."""
+    config: DeskConfig = ctx.obj.config
+    paths: Paths = ctx.obj.paths
+    trade_date = date or today_ny()
+    try:
+        decision_file = finalize(paths, config, trade_date)
+    except FinalizeError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    for decision in decision_file.decisions:
+        if decision.order is not None:
+            typer.echo(f"{decision.symbol} order {decision.order.side} {decision.order.qty}")
+        else:
+            typer.echo(f"{decision.symbol} {decision.status}: {decision.reason}")

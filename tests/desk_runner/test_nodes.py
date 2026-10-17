@@ -219,12 +219,42 @@ def test_apply_without_prompt_refused(paths, cfg):
         apply_answer(paths, DATE, SYMBOL, "bull", cfg)
 
 
-def test_prompt_twice_refused(paths, cfg):
+def test_prompt_twice_returns_same_turn(paths, cfg):
+    _state(paths)
+    first = build_prompt(paths, DATE, SYMBOL, "bull", cfg)
+
+    second = build_prompt(paths, DATE, SYMBOL, "bull", cfg)
+
+    assert second == first
+    turns = paths.symbol_dir(DATE, SYMBOL) / "turns"
+    assert sorted(p.name for p in turns.glob("*.prompt.md")) == ["01_bull.prompt.md"]
+
+
+def test_stale_pending_turn_is_superseded(paths, cfg):
     _state(paths)
     build_prompt(paths, DATE, SYMBOL, "bull", cfg)
+    update_state(paths, DATE, SYMBOL, lambda _s: {"market_report": "CHANGED REPORT"})
 
-    with pytest.raises(NodeError):
-        build_prompt(paths, DATE, SYMBOL, "bull", cfg)
+    fresh = build_prompt(paths, DATE, SYMBOL, "bull", cfg)
+
+    turns = paths.symbol_dir(DATE, SYMBOL) / "turns"
+    assert fresh.prompt_path.name == "02_bull.prompt.md"
+    assert "CHANGED REPORT" in fresh.prompt_path.read_text()
+    assert (turns / "01_bull.superseded.json").exists()
+    assert not (turns / "01_bull.meta.json").exists()
+
+
+def test_apply_with_hash_mismatch_refused(paths, cfg):
+    _state(paths)
+    prompt = build_prompt(paths, DATE, SYMBOL, "bull", cfg)
+    prompt.answer_path.write_text("case")
+    update_state(paths, DATE, SYMBOL, lambda _s: {"market_report": "CHANGED REPORT"})
+    before = paths.state_file(DATE, SYMBOL).read_bytes()
+
+    with pytest.raises(NodeError, match="state changed since prompt"):
+        apply_answer(paths, DATE, SYMBOL, "bull", cfg)
+
+    assert paths.state_file(DATE, SYMBOL).read_bytes() == before
 
 
 def test_apply_twice_refused(paths, cfg):

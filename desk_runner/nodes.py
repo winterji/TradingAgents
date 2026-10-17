@@ -132,17 +132,25 @@ def next_nodes(state: dict[str, Any], cfg: DeskConfig) -> list[str]:
 
 
 def build_prompt(paths: Paths, date: str, symbol: str, node: str, cfg: DeskConfig) -> PromptFile:
-    """Capture the prompt ``node`` would send next and write it as a turn for a sub-agent."""
-    state = _require_next(paths, date, symbol, node, cfg)
-    turns = _turns_dir(paths, date, symbol)
-    if _pending_meta(turns, node) is not None:
-        raise NodeError(f"a prompt for {node} is already pending; apply its answer first")
+    """Capture the prompt ``node`` would send next and write it as a turn for a sub-agent.
 
+    Idempotent: a pending turn whose prompt still matches the current state is returned
+    as it is. A pending turn whose prompt no longer matches is superseded by a new turn.
+    """
+    state = _require_next(paths, date, symbol, node, cfg)
     spec = NODES[node]
+    turns = _turns_dir(paths, date, symbol)
     model = StandInChatModel(answer=lambda _messages: "", structured=_take_free_text)
     with _sentiment_sources(paths, date, symbol, record=True) if spec.key == "social" else nullcontext():
         spec.factory(model)(state)
     rendered = _first_call_text(model, node)
+    digest = prompt_hash(rendered)
+
+    pending = _pending_meta(turns, node)
+    if pending is not None:
+        if json.loads(pending.read_text())["prompt_sha256"] == digest:
+            return _prompt_file(turns, pending)
+        _retire(pending, "superseded")
 
     turns.mkdir(parents=True, exist_ok=True)
     stem = f"{_next_turn_number(turns):02d}_{node}"
@@ -155,7 +163,7 @@ def build_prompt(paths: Paths, date: str, symbol: str, node: str, cfg: DeskConfi
             "node": node,
             "tier": spec.tier,
             "model": MODEL_ALIAS[spec.tier],
-            "prompt_sha256": prompt_hash(rendered),
+            "prompt_sha256": digest,
             "answer_file": answer_path.name,
         },
     )
@@ -190,7 +198,11 @@ def apply_answer(
             update = spec.factory(model)(state)
         if prompt_hash(_first_call_text(model, node)) != meta["prompt_sha256"]:
             raise NodeError("state changed since prompt")
-        return _state_update(spec, update)
+        result = _state_update(spec, update)
+        # Last step under the lock: if the state write then fails, the state did not
+        # advance and the next `ma prompt` simply makes a fresh turn.
+        _retire(meta_path, "applied")
+        return result
 
     merged = update_state(paths, date, symbol, merge)
     if parsed is not None:
@@ -198,7 +210,6 @@ def apply_answer(
             paths.symbol_dir(date, symbol) / "structured" / f"{node}.json",
             parsed.model_dump(mode="json"),
         )
-    meta_path.rename(meta_path.with_name(meta_path.name.replace(".meta.json", ".applied.json")))
     return merged
 
 
@@ -220,6 +231,21 @@ def _pending_meta(turns: Path, node: str) -> Path | None:
     """The meta file of a turn whose answer has not been applied yet, if any."""
     pending = sorted(turns.glob(f"*_{node}.meta.json"))
     return pending[-1] if pending else None
+
+
+def _retire(meta_path: Path, suffix: str) -> None:
+    """Rename a turn's meta file so it no longer counts as pending."""
+    meta_path.rename(meta_path.with_name(meta_path.name.replace(".meta.json", f".{suffix}.json")))
+
+
+def _prompt_file(turns: Path, meta_path: Path) -> PromptFile:
+    meta = json.loads(meta_path.read_text())
+    stem = meta_path.name.removesuffix(".meta.json")
+    return PromptFile(
+        prompt_path=turns / f"{stem}.prompt.md",
+        answer_path=turns / meta["answer_file"],
+        model=meta["model"],
+    )
 
 
 def _next_turn_number(turns: Path) -> int:

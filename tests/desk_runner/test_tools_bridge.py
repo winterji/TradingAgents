@@ -132,3 +132,51 @@ def test_missing_state_is_bridge_error(paths, cfg, vendor):
             cfg,
         )
     assert vendor == []
+
+
+def test_arguments_are_coerced_like_toolnode(paths, cfg, vendor, state):
+    run_tool(
+        paths,
+        DATE,
+        SYMBOL,
+        "market",
+        "get_indicators",
+        {"indicator": "rsi", "curr_date": DATE, "look_back_days": "30"},
+        cfg,
+    )
+
+    _method, args, _kwargs = vendor[0]
+    assert args[3] == 30
+    assert isinstance(args[3], int)
+
+
+def test_unknown_extra_key_is_ignored(paths, cfg, vendor, state):
+    result = run_tool(
+        paths,
+        DATE,
+        SYMBOL,
+        "market",
+        "get_stock_data",
+        {"start_date": "2026-09-01", "end_date": "2026-10-01", "bogus": 1},
+        cfg,
+    )
+
+    assert result == "VENDOR OUTPUT"
+    assert len(vendor) == 1
+
+
+def test_invalid_args_are_logged_and_count(paths, cfg, vendor, state):
+    cfg = cfg.model_copy(update={"max_tool_rounds": 2})
+    invalid = {"start_date": "2026-09-01"}
+    valid = {"start_date": "2026-09-01", "end_date": "2026-10-01"}
+
+    with pytest.raises(ToolBridgeError):
+        run_tool(paths, DATE, SYMBOL, "market", "get_stock_data", invalid, cfg)
+    with pytest.raises(ToolBridgeError):
+        run_tool(paths, DATE, SYMBOL, "market", "get_stock_data", invalid, cfg)
+    result = run_tool(paths, DATE, SYMBOL, "market", "get_stock_data", valid, cfg)
+
+    log = paths.symbol_dir(DATE, SYMBOL) / "tool_calls.jsonl"
+    assert len(log.read_text().splitlines()) == 2
+    assert result == WRAP_UP
+    assert vendor == []

@@ -1,9 +1,13 @@
 """``ma tool``: run an upstream ``@tool`` for an analyst, with the run's state injected.
 
 The analyst sub-agent names the tool and passes only the model-visible arguments. The
-parameters the upstream ToolNode would fill from graph state (``InjectedState``) are
-read from the symbol's state file here, so the model cannot choose the symbol or the
-trade date.
+arguments are validated the way upstream's ToolNode validates them (``tool.args_schema``,
+lax, unknown keys dropped), and the parameters the ToolNode would fill from graph state
+(``InjectedState``) are read from the symbol's state file here, so the model cannot
+choose the symbol or the trade date.
+
+Counting: each ``ma tool`` call counts as one tool round, including a call whose
+arguments fail validation. Parallel calls are not grouped; each one is its own round.
 """
 
 import inspect
@@ -15,6 +19,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 from langgraph.prebuilt import InjectedState
+from pydantic import ValidationError
 
 from desk_runner.config import DeskConfig, Paths
 from desk_runner.nodes import NODES
@@ -24,7 +29,7 @@ from tradingagents.dataflows.files import locked
 
 
 class ToolBridgeError(Exception):
-    """The tool is not offered to this analyst, its arguments are wrong, or the state is unreadable."""
+    """The tool is not offered to this analyst, its arguments are invalid, or the state is unreadable."""
 
 
 def run_tool(
@@ -47,7 +52,6 @@ def run_tool(
     except StateError as exc:
         raise ToolBridgeError(str(exc)) from exc
     injected = _injected_arguments(tool, state)
-    _check_arguments(tool, args, injected)
 
     log_path = paths.symbol_dir(date, symbol) / "tool_calls.jsonl"
     with locked(log_path):
@@ -55,7 +59,7 @@ def run_tool(
             return WRAP_UP
         _append_call(log_path, analyst, tool_name, args)
 
-    return str(tool.func(**args, **injected))
+    return str(tool.func(**_validated_arguments(tool, args, injected)))
 
 
 def _allowed_tool(analyst: str, tool_name: str) -> BaseTool:
@@ -83,16 +87,22 @@ def _injected_arguments(tool: BaseTool, state: dict[str, Any]) -> dict[str, Any]
     return injected
 
 
-def _check_arguments(tool: BaseTool, args: dict[str, Any], injected: dict[str, Any]) -> None:
+def _validated_arguments(
+    tool: BaseTool, args: dict[str, Any], injected: dict[str, Any]
+) -> dict[str, Any]:
+    """The tool's keyword arguments, validated and coerced exactly as upstream's ToolNode does."""
     for name in args:
         if name in injected:
             raise ToolBridgeError(
                 f"{name!r} is an injected argument and cannot be set by the model"
             )
+    schema = tool.args_schema
     try:
-        inspect.signature(tool.func).bind(**args, **injected)
-    except TypeError as exc:
+        validated = schema.model_validate({**args, **injected})
+    except ValidationError as exc:
         raise ToolBridgeError(f"invalid arguments for {tool.name}: {exc}") from exc
+    parameters = inspect.signature(tool.func).parameters
+    return {name: getattr(validated, name) for name in schema.model_fields if name in parameters}
 
 
 def _rounds_used(log_path: Path, analyst: str) -> int:

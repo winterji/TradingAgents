@@ -99,7 +99,7 @@ def _locked(path: Path) -> AbstractContextManager[bool]:
     return locked(path)
 
 
-def _read_pending(paths: Paths) -> list[PendingFill]:
+def read_pending(paths: Paths) -> list[PendingFill]:
     if not paths.pending_fills_file.exists():
         return []
     return [
@@ -114,7 +114,14 @@ def _write_pending(paths: Paths, fills: list[PendingFill]) -> None:
 
 def add_pending(paths: Paths, fills: list[PendingFill]) -> None:
     with _locked(paths.pending_fills_file):
-        _write_pending(paths, _read_pending(paths) + fills)
+        _write_pending(paths, read_pending(paths) + fills)
+
+
+def replace_pending_for_date(paths: Paths, trade_date: str, fills: list[PendingFill]) -> None:
+    """Replace the pending fills dated ``trade_date`` with ``fills``; other dates are kept. Idempotent."""
+    with _locked(paths.pending_fills_file):
+        kept = [fill for fill in read_pending(paths) if fill.trade_date != trade_date]
+        _write_pending(paths, kept + fills)
 
 
 def process_pending(paths: Paths, cfg: DeskConfig, today: str, open_price: OpenPrice) -> FillReport:
@@ -127,7 +134,7 @@ def process_pending(paths: Paths, cfg: DeskConfig, today: str, open_price: OpenP
     with _locked(paths.pending_fills_file), _locked(paths.book_file):
         book = load_book(paths, cfg)
         remaining: list[PendingFill] = []
-        for fill in _read_pending(paths):
+        for fill in read_pending(paths):
             if fill.trade_date >= today:
                 report.still_pending.append(fill)
                 remaining.append(fill)

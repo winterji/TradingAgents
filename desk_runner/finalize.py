@@ -1,8 +1,10 @@
-"""``ma finalize``: turn each symbol's finished pipeline into a decision, a pending order and a memory entry.
+"""``ma finalize``: turn each symbol's finished pipeline into a decision, pending orders and memory entries.
 
-Writes happen in a fixed order: the decision file first, then the pending fills, then the
-memory log. A crash after the decision file is written makes a rerun refuse (no double
-orders); the memory log skips a decision it already has.
+Inside the decisions lock the writes happen in a fixed order: this trade date's pending fills
+(replaced, never appended, so a rerun cannot double them), then the decision file (atomic), then
+the memory log. A crash before the decision file leaves no decision file, so a rerun completes the
+day. A crash after it makes a rerun refuse, so no order is queued twice. A symbol with an earlier
+order still pending is ``review``: its position is not known yet, so nothing is sized for it.
 """
 
 from collections.abc import Callable
@@ -12,7 +14,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from desk_runner.book import PendingFill, add_pending, equity, load_book
+from desk_runner.book import PendingFill, equity, load_book, read_pending, replace_pending_for_date
 from desk_runner.config import DeskConfig, Paths, upstream_config, write_json_atomic
 from desk_runner.decision_file import DecisionFile, Rounds, SymbolDecision, new_run_id
 from desk_runner.market import MarketDataError, last_close
@@ -29,6 +31,7 @@ Clock = Callable[[], datetime]
 RUN_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 PIPELINE_INCOMPLETE = "pipeline incomplete"
 NO_REFERENCE_PRICE = "no reference price"
+EARLIER_ORDER_UNFILLED = "earlier order not yet filled"
 
 
 class FinalizeError(Exception):
@@ -57,8 +60,11 @@ def finalize(
         states = {symbol: _load_state_or_none(paths, date, symbol) for symbol in cfg.symbols}
         prices = _reference_prices(date, price, [*cfg.symbols, *(p.ticker for p in book.positions)])
         equity_before = _equity_or_none(book, prices)
+        unfilled = {fill.symbol for fill in read_pending(paths) if fill.trade_date < date}
         decisions = [
-            _decide(paths, date, symbol, states[symbol], book, prices, equity_before)
+            _decide(
+                paths, date, symbol, states[symbol], book, prices, equity_before, symbol in unfilled
+            )
             for symbol in cfg.symbols
         ]
         decision_file = DecisionFile(
@@ -71,17 +77,17 @@ def finalize(
             equity_before=equity_before,
             decisions=decisions,
         )
+        replace_pending_for_date(
+            paths,
+            date,
+            [
+                PendingFill(trade_date=date, symbol=d.symbol, side=d.order.side, qty=d.order.qty)
+                for d in decisions
+                if d.order is not None
+            ],
+        )
         write_json_atomic(decisions_path, decision_file.model_dump(mode="json"))
-
-    add_pending(
-        paths,
-        [
-            PendingFill(trade_date=date, symbol=d.symbol, side=d.order.side, qty=d.order.qty)
-            for d in decisions
-            if d.order is not None
-        ],
-    )
-    _log_decisions(paths, cfg, date, states)
+        _log_decisions(paths, cfg, date, states)
     return decision_file
 
 
@@ -122,12 +128,15 @@ def _decide(
     book: PortfolioContext,
     prices: dict[str, float],
     equity_before: float | None,
+    earlier_unfilled: bool,
 ) -> SymbolDecision:
     held = book.position_in(symbol)
     current_qty = int(held.quantity) if held is not None else 0
     state_file = paths.state_file(date, symbol).relative_to(paths.var_dir).as_posix()
     base: dict[str, Any] = {"symbol": symbol, "current_qty": current_qty, "state_file": state_file}
 
+    if earlier_unfilled:
+        return SymbolDecision(status="review", reason=EARLIER_ORDER_UNFILLED, **base)
     if not _final_text(state):
         return SymbolDecision(status="review", reason=PIPELINE_INCOMPLETE, **base)
 

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from desk_runner.book import save_book
+from desk_runner.book import PendingFill, add_pending, save_book
 from desk_runner.config import (
     DEFAULT_CONFIG_PATH,
     DeskConfig,
@@ -214,3 +214,71 @@ def test_new_run_id_format():
     run_id = new_run_id(NOW)
 
     assert re.fullmatch(r"2026-10-17T12:00:00Z-[0-9a-f]{6}", run_id)
+
+
+def test_earlier_unfilled_order_blocks_symbol(paths, cfg):
+    """C1: day-1 orders still pending (their open was unknown) make day-2 review, not order."""
+    day1 = [
+        PendingFill(trade_date="2026-10-16", symbol=symbol, side="buy", qty=5)
+        for symbol in ("AAPL", "GOOGL", "AMZN")
+    ]
+    add_pending(paths, day1)
+    before = paths.pending_fills_file.read_text()
+    _three_complete(paths)
+
+    result = finalize(paths, cfg, DATE, price=_price(), now=lambda: NOW)
+
+    for symbol in ("AAPL", "GOOGL", "AMZN"):
+        decision = _by_symbol(result)[symbol]
+        assert decision.status == "review"
+        assert decision.reason == "earlier order not yet filled"
+        assert decision.order is None
+    assert json.loads(paths.pending_fills_file.read_text()) == json.loads(before)
+
+
+def test_earlier_unfilled_order_blocks_only_its_symbol(paths, cfg):
+    add_pending(paths, [PendingFill(trade_date="2026-10-16", symbol="AAPL", side="buy", qty=5)])
+    _three_complete(paths)
+
+    result = finalize(paths, cfg, DATE, price=_price(), now=lambda: NOW)
+
+    assert _by_symbol(result)["AAPL"].status == "review"
+    assert _by_symbol(result)["GOOGL"].status == "order"
+
+
+def test_crash_after_pending_write_rerun_has_one_copy(paths, cfg, monkeypatch):
+    """I6: a crash on the decision file write leaves no decision file; a rerun completes the day."""
+    import desk_runner.finalize as finalize_module
+
+    _three_complete(paths)
+    real_write = finalize_module.write_json_atomic
+    failures = {"left": 1}
+
+    def crash_once_on_decision_file(path, data):
+        if path == paths.decisions_file(DATE) and failures["left"] > 0:
+            failures["left"] -= 1
+            raise OSError("simulated crash")
+        return real_write(path, data)
+
+    monkeypatch.setattr(finalize_module, "write_json_atomic", crash_once_on_decision_file)
+    with pytest.raises(OSError, match="simulated crash"):
+        finalize(paths, cfg, DATE, price=_price(), now=lambda: NOW)
+    assert not paths.decisions_file(DATE).exists()
+    assert len(json.loads(paths.pending_fills_file.read_text())) == 3
+
+    finalize(paths, cfg, DATE, price=_price(), now=lambda: NOW)
+
+    assert paths.decisions_file(DATE).exists()
+    pending = json.loads(paths.pending_fills_file.read_text())
+    assert sorted(entry["symbol"] for entry in pending) == ["AAPL", "AMZN", "GOOGL"]
+    assert len(pending) == 3
+
+
+def test_rerun_after_success_still_refuses_and_keeps_one_copy(paths, cfg):
+    _three_complete(paths)
+    finalize(paths, cfg, DATE, price=_price(), now=lambda: NOW)
+
+    with pytest.raises(FinalizeError):
+        finalize(paths, cfg, DATE, price=_price(), now=lambda: NOW)
+
+    assert len(json.loads(paths.pending_fills_file.read_text())) == 3

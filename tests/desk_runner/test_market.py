@@ -98,3 +98,30 @@ def test_empty_price_cells_are_skipped(monkeypatch):
 
     assert last_close("AAPL", "2026-10-20") == 343.39
     assert open_on("AAPL", "2026-10-19") is None
+
+
+def test_vendor_error_is_market_data_error(monkeypatch):
+    def failing(*args, **kwargs):
+        raise ConnectionError("vendor down")
+
+    monkeypatch.setattr(market, "route_to_vendor", failing)
+
+    with pytest.raises(MarketDataError):
+        last_close("AAPL", "2026-10-19")
+    assert open_on("AAPL", "2026-10-19") is None
+
+
+def test_sentinel_string_is_market_data_error(monkeypatch):
+    monkeypatch.setattr(market, "route_to_vendor", lambda *a, **k: "NO_DATA_AVAILABLE: no vendor")
+
+    with pytest.raises(MarketDataError):
+        last_close("AAPL", "2026-10-19")
+    assert open_on("AAPL", "2026-10-19") is None
+
+
+def test_csv_without_close_column_is_market_data_error(monkeypatch):
+    csv_text = "# Stock data for AAPL\n\nDate,Open,High,Low,Volume\n2026-10-16,334,344,333,1200\n"
+    monkeypatch.setattr(market, "route_to_vendor", lambda *a, **k: csv_text)
+
+    with pytest.raises(MarketDataError):
+        last_close("AAPL", "2026-10-19")

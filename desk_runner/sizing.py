@@ -12,23 +12,34 @@ from pydantic import BaseModel, Field
 
 SizeKind = Literal["pct", "usd", "shares"]
 
-_NUMBER = r"\d[\d,]*(?:\.\d+)?"
-_RANGE_SEP = r"\s*(?:-|–|to)\s*"
+# Numbers: "1,000", "2500", "2.5". The left guard stops matches inside ".5" or "1,5".
+_NUM = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+_LEFT = r"(?<![\d.,])"
+_SEP = r"\s*(?:-|–|to)\s*"
 _BASIS = r"\s+of\s+(?:the\s+)?(?:total\s+)?(?:portfolio|equity|capital|account)\b"
 
-# Each pattern captures (low, high); the high group is None for a single value.
+# Each pattern captures (lo, hi); hi is None for a single value.
 _PCT_RE = re.compile(
-    rf"(?P<lo>\d+(?:\.\d+)?)(?:{_RANGE_SEP}(?P<hi>\d+(?:\.\d+)?))?\s*(?:%|percent){_BASIS}",
+    rf"{_LEFT}(?P<lo>{_NUM})(?:(?:\s*(?:%|percent))?{_SEP}(?P<hi>{_NUM}))?"
+    rf"\s*(?:%|percent){_BASIS}",
     re.IGNORECASE,
 )
 _USD_RE = re.compile(
-    rf"\$\s?(?P<lo>{_NUMBER})(?P<lo_k>k)?(?:{_RANGE_SEP}\$?\s?(?P<hi>{_NUMBER})(?P<hi_k>k)?)?",
+    rf"\$\s?(?P<lo>{_NUM})(?P<lo_k>k)?(?:{_SEP}\$?\s?(?P<hi>{_NUM})(?P<hi_k>k)?)?",
     re.IGNORECASE,
 )
 _SHARES_RE = re.compile(
-    rf"(?P<lo>\d+(?:\.\d+)?)(?:{_RANGE_SEP}(?P<hi>\d+(?:\.\d+)?))?\s+shares?\b",
+    rf"{_LEFT}(?P<lo>{_NUM})(?:{_SEP}(?P<hi>{_NUM}))?\s+shares?\b",
     re.IGNORECASE,
 )
+
+# A clause ends at ";", ":", parentheses, a newline, or a "." or "," not followed by a digit.
+_CLAUSE_BREAK = re.compile(r"[.,](?!\d)|[;:()\n]")
+_RISK_RE = re.compile(r"\brisk\b", re.IGNORECASE)
+_PRICE_WORDS = frozenset(
+    {"stop", "stop-loss", "target", "entry", "at", "near", "below", "above", "price"}
+)
+_PRICE_TAIL_RE = re.compile(r"\s*(?:entry|stop|target)\b", re.IGNORECASE)
 
 
 class ParsedSize(BaseModel):
@@ -67,6 +78,36 @@ def _usd_value(match: re.Match[str]) -> float:
     return _midpoint(lo, hi)
 
 
+def _clause_bounds(text: str, pos: int) -> tuple[int, int]:
+    """Return the (start, end) of the clause that contains position ``pos``."""
+    start = 0
+    for brk in _CLAUSE_BREAK.finditer(text, 0, pos):
+        start = brk.end()
+    end = len(text)
+    brk = _CLAUSE_BREAK.search(text, pos)
+    if brk is not None:
+        end = brk.start()
+    return start, end
+
+
+def _is_price_level(text: str, match: re.Match[str]) -> bool:
+    """True if a ``$N`` reads as a price (stop, entry, target), not as a position size."""
+    start, _ = _clause_bounds(text, match.start())
+    words = re.findall(r"[A-Za-z][A-Za-z-]*", text[start : match.start()])[-3:]
+    if any(word.lower() in _PRICE_WORDS for word in words):
+        return True
+    return _PRICE_TAIL_RE.match(text, match.end()) is not None
+
+
+def _has_risk_budget(text: str) -> bool:
+    """True if a percentage shares its clause with the word "risk" (a risk budget, not a size)."""
+    for match in _PCT_RE.finditer(text):
+        start, end = _clause_bounds(text, match.start())
+        if _RISK_RE.search(text[start:end]):
+            return True
+    return False
+
+
 def _candidates(text: str) -> list[ParsedSize]:
     found: list[ParsedSize] = []
     for match in _PCT_RE.finditer(text):
@@ -74,17 +115,18 @@ def _candidates(text: str) -> list[ParsedSize]:
         found.append(
             ParsedSize(
                 kind="pct",
-                value=_midpoint(float(match.group("lo")), None if hi is None else float(hi)),
+                value=_midpoint(_number(match.group("lo")), None if hi is None else _number(hi)),
             )
         )
     for match in _USD_RE.finditer(text):
-        found.append(ParsedSize(kind="usd", value=_usd_value(match)))
+        if not _is_price_level(text, match):
+            found.append(ParsedSize(kind="usd", value=_usd_value(match)))
     for match in _SHARES_RE.finditer(text):
         hi = match.group("hi")
         found.append(
             ParsedSize(
                 kind="shares",
-                value=_midpoint(float(match.group("lo")), None if hi is None else float(hi)),
+                value=_midpoint(_number(match.group("lo")), None if hi is None else _number(hi)),
             )
         )
     return found
@@ -92,7 +134,7 @@ def _candidates(text: str) -> list[ParsedSize]:
 
 def parse_size(text: str | None) -> ParsedSize | None:
     """Return the single size the text states, or None if it is missing, unclear or ambiguous."""
-    if not text:
+    if not text or _has_risk_budget(text):
         return None
     distinct = {(c.kind, c.value) for c in _candidates(text)}
     if len(distinct) != 1:
@@ -154,7 +196,11 @@ def size_decision(
     if price <= 0 or equity <= 0:
         return _review("price and equity must be positive to size the order", size)
 
-    target = rating * _shares(size, equity, price)
+    shares = _shares(size, equity, price)
+    if shares == 0:
+        return _review("size rounds to zero shares", size)
+
+    target = rating * shares
     order_qty = target - current_qty
     if order_qty == 0:
         return SizingResult(

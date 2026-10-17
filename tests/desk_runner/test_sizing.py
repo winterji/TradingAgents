@@ -187,3 +187,49 @@ def test_non_positive_price_or_equity_review(price, equity):
     )
     assert result.status == "review"
     assert result.order is None
+
+
+@pytest.mark.parametrize(
+    ("text", "kind", "value"),
+    [
+        ("1,000 shares", "shares", 1000),
+        ("2,500 shares", "shares", 2500),
+        ("3% to 5% of portfolio", "pct", 4),
+        ("3%-5% of portfolio", "pct", 4),
+    ],
+)
+def test_parse_regressions(text, kind, value):
+    assert parse_size(text) == ParsedSize(kind=kind, value=value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Stop at $325",
+        "Scale in near $343 entry",
+        "Risk 1% of portfolio on this trade",
+        "2% of portfolio at risk",
+        ".5 of portfolio",
+        ".5% of portfolio",
+    ],
+)
+def test_parse_rejects_regressions(text):
+    assert parse_size(text) is None
+
+
+def test_parse_keeps_size_next_to_price_level():
+    assert parse_size("Buy $2,000 of stock, stop at $325") == ParsedSize(kind="usd", value=2000)
+
+
+def test_zero_share_size_is_review_not_sell():
+    result = size_decision(
+        final_rating="Buy",
+        trader_action="Buy",
+        position_sizing="$100",
+        current_qty=10,
+        price=343.39,
+        equity=100000,
+    )
+    assert result.status == "review"
+    assert result.reason == "size rounds to zero shares"
+    assert result.order is None

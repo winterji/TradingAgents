@@ -18,6 +18,7 @@ from desk_runner.config import (
 )
 from desk_runner.nodes import NodeError, apply_answer, build_prompt, next_nodes
 from desk_runner.state_store import StateError, load_state
+from desk_runner.tools_bridge import ToolBridgeError, run_tool
 from tradingagents.dataflows.config import set_config
 
 app = typer.Typer(help="Desk runner: TradingAgents research and paper-trading desk.")
@@ -121,3 +122,36 @@ def apply_command(
         typer.echo(json.dumps({"ok": False, "error": str(exc)}))
         raise typer.Exit(code=1) from exc
     typer.echo(json.dumps({"ok": True, "next": next_nodes(state, config)}))
+
+
+ToolArgument = Annotated[str, typer.Argument(help="Upstream tool name, e.g. get_stock_data.")]
+ArgsArgument = Annotated[str, typer.Argument(help="Model-visible tool arguments as a JSON object.")]
+
+
+@app.command("tool")
+def tool_command(
+    ctx: typer.Context,
+    symbol: SymbolArgument,
+    analyst: NodeArgument,
+    tool: ToolArgument,
+    args: ArgsArgument,
+    date: DateOption = None,
+) -> None:
+    """Run an upstream data tool for an analyst; prints the tool's output."""
+    config: DeskConfig = ctx.obj.config
+    paths: Paths = ctx.obj.paths
+    trade_date = date or today_ny()
+    try:
+        arguments = json.loads(args)
+    except json.JSONDecodeError as exc:
+        typer.echo(f"error: arguments are not valid JSON: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    if not isinstance(arguments, dict):
+        typer.echo("error: arguments must be a JSON object", err=True)
+        raise typer.Exit(code=1)
+    try:
+        output = run_tool(paths, trade_date, symbol, analyst, tool, arguments, config)
+    except ToolBridgeError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(output)

@@ -233,3 +233,98 @@ def test_zero_share_size_is_review_not_sell():
     assert result.status == "review"
     assert result.reason == "size rounds to zero shares"
     assert result.order is None
+
+
+# C2: risk or loss wording in the clause of any size kind makes the size unreadable.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Risk $500",
+        "risk $500 with a stop at $180",
+        "Max loss of $1,000",
+        "risk 100 shares",
+        "Buy 100 shares, max loss $500",
+        "Drawdown limit 3% of portfolio",
+    ],
+)
+def test_parse_rejects_risk_or_loss_wording_for_any_size(text):
+    assert parse_size(text) is None
+
+
+# C3: a $ range suffix applies to both ends; M is a million; b/bn is a billion, so review.
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("$2-3k", 2500),
+        ("$2k-3k", 2500),
+        ("$1.5M", 1_500_000),
+        ("$2-3m", 2_500_000),
+        ("$2,000-3k", 2500),
+        ("$2k-3000", 2500),
+        ("$1,000-3k", 2000),
+    ],
+)
+def test_parse_usd_suffixes(text, value):
+    assert parse_size(text) == ParsedSize(kind="usd", value=value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "$1.5bn",
+        "$1-2b",
+        "$2 billion",
+        "$500-3k",  # 500 read as thousands would make the low end larger than the high end
+        "$1k-2m",  # mixed units are ambiguous
+    ],
+)
+def test_parse_usd_billion_or_ambiguous_range_is_review(text):
+    assert parse_size(text) is None
+
+
+# I4b: change wording (add, trim, exit, half, ...) means a change of an existing position, not a size.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Exit the entire position (100 shares)",
+        "Add 2% of portfolio to the existing position",
+        "Trim 2% of portfolio",
+        "half of 5% of portfolio",
+        "Reduce 3% of portfolio",
+        "Increase by 2% of portfolio",
+        "Close 50 shares",
+        "Sell the remaining 40 shares",
+        "Full 5% of portfolio",
+        "A quarter of 5% of portfolio",
+    ],
+)
+def test_parse_rejects_change_wording(text):
+    assert parse_size(text) is None
+
+
+# C1 + I4a: an order that opposes the rating is review, never an order.
+def test_order_opposing_overweight_rating_is_review():
+    result = size_decision(
+        final_rating="Overweight",
+        trader_action="Buy",
+        position_sizing="2% of portfolio",
+        current_qty=200,
+        price=100,
+        equity=100000,
+    )
+    assert result.status == "review"
+    assert result.reason == "order side opposes rating"
+    assert result.order is None
+
+
+def test_order_opposing_sell_rating_is_review():
+    result = size_decision(
+        final_rating="Sell",
+        trader_action="Sell",
+        position_sizing="2% of portfolio",
+        current_qty=-200,
+        price=100,
+        equity=100000,
+    )
+    assert result.status == "review"
+    assert result.order is None

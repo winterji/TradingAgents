@@ -24,8 +24,14 @@ _PCT_RE = re.compile(
     rf"\s*(?:%|percent){_BASIS}",
     re.IGNORECASE,
 )
+# Optional magnitude after a $ amount: "k", "m", "b"/"bn" (a billion, always review), or the words.
+_USD_UNIT = r"(?:\s*(?P<{}>thousand|million|billion|bn|b|m|k)(?![a-z]))?"
 _USD_RE = re.compile(
-    rf"\$\s?(?P<lo>{_NUM})(?P<lo_k>k)?(?:{_SEP}\$?\s?(?P<hi>{_NUM})(?P<hi_k>k)?)?",
+    rf"\$\s?(?P<lo>{_NUM})"
+    + _USD_UNIT.format("lo_u")
+    + rf"(?:{_SEP}\$?\s?(?P<hi>{_NUM})"
+    + _USD_UNIT.format("hi_u")
+    + r")?",
     re.IGNORECASE,
 )
 _SHARES_RE = re.compile(
@@ -35,7 +41,20 @@ _SHARES_RE = re.compile(
 
 # A clause ends at ";", ":", parentheses, a newline, or a "." or "," not followed by a digit.
 _CLAUSE_BREAK = re.compile(r"[.,](?!\d)|[;:()\n]")
-_RISK_RE = re.compile(r"\brisk\b", re.IGNORECASE)
+_RISK_RE = re.compile(r"\b(?:risks?|loss(?:es)?|drawdown)\b", re.IGNORECASE)
+# Words that describe a change to an existing position, not a size of a new one. Any of them is review.
+_CHANGE_RE = re.compile(
+    r"\b(?:add|additional|increase|trim|reduce|cut|exit|close|entire|full|all|remaining"
+    r"|half|quarter|third)\b",
+    re.IGNORECASE,
+)
+_MULTIPLIERS: dict[str, float] = {
+    "k": 1e3,
+    "thousand": 1e3,
+    "m": 1e6,
+    "million": 1e6,
+}
+_BILLION_UNITS = frozenset({"b", "bn", "billion"})
 _PRICE_WORDS = frozenset(
     {"stop", "stop-loss", "target", "entry", "at", "near", "below", "above", "price"}
 )
@@ -70,11 +89,28 @@ def _midpoint(lo: float, hi: float | None) -> float:
     return lo if hi is None else (lo + hi) / 2
 
 
-def _usd_value(match: re.Match[str]) -> float:
-    lo = _number(match.group("lo")) * (1000 if match.group("lo_k") else 1)
+def _usd_value(match: re.Match[str]) -> float | None:
+    """The dollar amount a ``$`` match states, or None when it is a billion or an ambiguous range."""
+    lo_unit = (match.group("lo_u") or "").lower() or None
+    hi_unit = (match.group("hi_u") or "").lower() or None
+    if lo_unit in _BILLION_UNITS or hi_unit in _BILLION_UNITS:
+        return None
+    lo_raw = _number(match.group("lo"))
     if match.group("hi") is None:
-        return lo
-    hi = _number(match.group("hi")) * (1000 if match.group("hi_k") else 1)
+        return lo_raw * _MULTIPLIERS.get(lo_unit or "", 1)
+
+    hi_raw = _number(match.group("hi"))
+    lo_mult = _MULTIPLIERS.get(lo_unit or "")
+    hi_mult = _MULTIPLIERS.get(hi_unit or "")
+    if lo_mult and hi_mult and lo_mult != hi_mult:
+        return None
+    # A unit on one end applies to the other end too, unless that end is already written in
+    # full (1,000 or more, e.g. "$2,000-3k"). Two ends with no unit are plain dollars.
+    shared = lo_mult or hi_mult or 1.0
+    lo = lo_raw * (lo_mult or (shared if lo_raw < 1000 else 1.0))
+    hi = hi_raw * (hi_mult or (shared if hi_raw < 1000 else 1.0))
+    if lo > hi:
+        return None
     return _midpoint(lo, hi)
 
 
@@ -100,15 +136,16 @@ def _is_price_level(text: str, match: re.Match[str]) -> bool:
 
 
 def _has_risk_budget(text: str) -> bool:
-    """True if a percentage shares its clause with the word "risk" (a risk budget, not a size)."""
-    for match in _PCT_RE.finditer(text):
+    """True if any size in the text shares its clause with risk or loss wording (a risk budget)."""
+    for match in (*_PCT_RE.finditer(text), *_USD_RE.finditer(text), *_SHARES_RE.finditer(text)):
         start, end = _clause_bounds(text, match.start())
         if _RISK_RE.search(text[start:end]):
             return True
     return False
 
 
-def _candidates(text: str) -> list[ParsedSize]:
+def _candidates(text: str) -> list[ParsedSize] | None:
+    """Every size the text states, or None when one of them is a billion or an ambiguous range."""
     found: list[ParsedSize] = []
     for match in _PCT_RE.finditer(text):
         hi = match.group("hi")
@@ -119,8 +156,12 @@ def _candidates(text: str) -> list[ParsedSize]:
             )
         )
     for match in _USD_RE.finditer(text):
-        if not _is_price_level(text, match):
-            found.append(ParsedSize(kind="usd", value=_usd_value(match)))
+        if _is_price_level(text, match):
+            continue
+        value = _usd_value(match)
+        if value is None:
+            return None
+        found.append(ParsedSize(kind="usd", value=value))
     for match in _SHARES_RE.finditer(text):
         hi = match.group("hi")
         found.append(
@@ -134,9 +175,12 @@ def _candidates(text: str) -> list[ParsedSize]:
 
 def parse_size(text: str | None) -> ParsedSize | None:
     """Return the single size the text states, or None if it is missing, unclear or ambiguous."""
-    if not text or _has_risk_budget(text):
+    if not text or _has_risk_budget(text) or _CHANGE_RE.search(text):
         return None
-    distinct = {(c.kind, c.value) for c in _candidates(text)}
+    candidates = _candidates(text)
+    if candidates is None:
+        return None
+    distinct = {(c.kind, c.value) for c in candidates}
     if len(distinct) != 1:
         return None
     kind, value = distinct.pop()
@@ -210,6 +254,8 @@ def size_decision(
             target_qty=target,
         )
     side: Literal["buy", "sell"] = "buy" if order_qty > 0 else "sell"
+    if (1 if side == "buy" else -1) != rating:
+        return _review("order side opposes rating", size)
     return SizingResult(
         status="order",
         reason=f"move position from {current_qty} to {target} shares",

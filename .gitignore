@@ -221,3 +221,6 @@ __marimo__/
 # Enterprise env file (secrets) and generated run reports
 .env.enterprise
 reports/
+
+# desk_runner runtime state (decisions, runs, book)
+desk_runner/var/

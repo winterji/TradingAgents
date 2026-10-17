@@ -1,0 +1,10 @@
+symbols: [AAPL, GOOGL, AMZN]
+max_debate_rounds: 3
+max_risk_discuss_rounds: 3
+max_tool_rounds: 20
+initial_cash: 100000
+currency: USD
+models:
+  deep: claude-opus-5-5
+  quick: claude-sonnet-5-5
+var_dir: desk_runner/var

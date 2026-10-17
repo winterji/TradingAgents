@@ -245,10 +245,16 @@ app.add_typer(state_app, name="state")
 
 @state_app.command("init")
 def state_init_command(ctx: typer.Context, symbol: SymbolArgument, date: DateOption = None) -> None:
-    """Create the day's state file for a symbol, seeded with the book, past lessons and identity."""
+    """Create the day's state file for a symbol, seeded with the book, past lessons and identity.
+
+    Safe to rerun: an existing state file is kept as it is and reported as ``resumed``.
+    """
     config: DeskConfig = ctx.obj.config
     paths: Paths = ctx.obj.paths
     trade_date = date or today_ny()
+    if paths.state_file(trade_date, symbol).exists():
+        typer.echo(json.dumps({"ok": True, "symbol": symbol, "date": trade_date, "resumed": True}))
+        return
     try:
         init_state(
             paths,
@@ -263,4 +269,4 @@ def state_init_command(ctx: typer.Context, symbol: SymbolArgument, date: DateOpt
     except (StateError, MemoryBridgeError) as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    typer.echo(json.dumps({"ok": True, "symbol": symbol, "date": trade_date}))
+    typer.echo(json.dumps({"ok": True, "symbol": symbol, "date": trade_date, "resumed": False}))

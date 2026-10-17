@@ -145,3 +145,17 @@ def test_init_non_trading_day(var_dir, monkeypatch):
     assert _json("init", date="2026-10-17") == {"trading_day": False}
     assert not (var_dir / "runs" / "2026-10-17").exists()
     assert not (var_dir / "book.json").exists()
+
+
+def test_state_init_rerun_resumes_without_changing_the_file(var_dir, offline):
+    """I5: a rerun of state init exits 0, reports resumed, and leaves the state file untouched."""
+    paths = Paths(var_dir)
+
+    first = _json("state", "init", "AAPL", date=DAY1)
+    assert first == {"ok": True, "symbol": "AAPL", "date": DAY1, "resumed": False}
+    before = paths.state_file(DAY1, "AAPL").read_bytes()
+
+    second = _json("state", "init", "AAPL", date=DAY1)
+
+    assert second == {"ok": True, "symbol": "AAPL", "date": DAY1, "resumed": True}
+    assert paths.state_file(DAY1, "AAPL").read_bytes() == before

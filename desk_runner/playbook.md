@@ -28,6 +28,9 @@ about trades yourself: the commands and the upstream code decide.
    - If it exits non-zero, stop and report the error.
    - If the output is `{"trading_day": false}`, stop and report "not a trading day". Do nothing else.
    - Otherwise keep the `symbols` list from the output for the rest of the run.
+   - If `fills.missing_price` or `fills.still_pending` is not empty, collect the symbols of those
+     entries and run `.venv/bin/ma log "pending fills not filled: <symbols>"` (comma-separated). They
+     stay pending, and finalize marks their symbols for review. Include them in the final reply.
 2. Run `.venv/bin/ma log "start"`.
 
 ## 2. Memory reflections
@@ -45,7 +48,9 @@ about trades yourself: the commands and the upstream code decide.
 
 ## 3. Start each symbol
 
-For each symbol from step 1, run `.venv/bin/ma state init <SYMBOL>`.
+For each symbol from step 1, run `.venv/bin/ma state init <SYMBOL>`. It is safe to rerun: when the
+day's state file already exists it prints `{"ok": true, ..., "resumed": true}` and changes nothing.
+A rerun of the same day therefore continues from `ma next`, and the state file is never reset.
 - If it exits non-zero, run `.venv/bin/ma log "state init failed for <SYMBOL>: <error>"` and leave
   that symbol out of the rest of the run. Finalize marks it for review.
 
@@ -122,6 +127,7 @@ tools sentence needs `{symbol}` and `{node}`; the other sentences use only `{pro
      not edit anything under `desk_runner/var/`.
 2. Run `.venv/bin/ma log "end"`.
 3. Reply with the finalize summary: one line per symbol, copied from the `ma finalize` output.
+   Above it, list the pending fills not filled from step 1, if any (symbols and why).
 
 ## Sub-agent wrapper
 

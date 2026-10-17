@@ -30,3 +30,19 @@ def test_playbook_mentions_every_command() -> None:
     text = PLAYBOOK.read_text(encoding="utf-8")
     missing = [needle for needle in REQUIRED_TEXT if needle not in text]
     assert not missing, f"playbook.md is missing: {missing}"
+
+
+def test_playbook_logs_unfilled_pending_fills_after_init() -> None:
+    """I7: fills still pending after init are logged and reported in the final reply."""
+    text = PLAYBOOK.read_text(encoding="utf-8")
+    for needle in (
+        "fills.missing_price",
+        "fills.still_pending",
+        'ma log "pending fills not filled: <symbols>"',
+    ):
+        assert needle in text, needle
+
+
+def test_playbook_state_init_rerun_is_safe() -> None:
+    text = PLAYBOOK.read_text(encoding="utf-8")
+    assert '"resumed": true' in text

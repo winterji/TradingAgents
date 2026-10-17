@@ -8,6 +8,8 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 
+from desk_runner import market
+from desk_runner.book import load_book, process_pending, render_for_agents
 from desk_runner.config import (
     ConfigError,
     DeskConfig,
@@ -19,12 +21,14 @@ from desk_runner.config import (
 from desk_runner.finalize import FinalizeError, finalize
 from desk_runner.memory_bridge import (
     MemoryBridgeError,
+    past_context,
     pending_reflections,
     settle_reflections,
 )
 from desk_runner.nodes import NodeError, apply_answer, build_prompt, next_nodes
-from desk_runner.state_store import StateError, load_state
+from desk_runner.state_store import StateError, init_state, load_state
 from desk_runner.tools_bridge import ToolBridgeError, run_tool
+from tradingagents.agents.context import build_instrument_context, resolve_instrument_identity
 from tradingagents.dataflows.config import set_config
 
 app = typer.Typer(help="Desk runner: TradingAgents research and paper-trading desk.")
@@ -52,6 +56,28 @@ def main(ctx: typer.Context) -> None:
     paths = Paths(config.var_dir)
     set_config(upstream_config(config, paths))
     ctx.obj = AppContext(config=config, paths=paths)
+
+
+@app.command("init")
+def init_command(ctx: typer.Context, date: DateOption = None) -> None:
+    """Fill the pending orders of earlier days at their open and start the day's run directory."""
+    config: DeskConfig = ctx.obj.config
+    paths: Paths = ctx.obj.paths
+    trade_date = date or today_ny()
+    if not market.is_trading_day(trade_date):
+        typer.echo(json.dumps({"trading_day": False}))
+        return
+    report = process_pending(paths, config, trade_date, market.open_on)
+    paths.run_dir(trade_date).mkdir(parents=True, exist_ok=True)
+    typer.echo(
+        json.dumps(
+            {
+                "trading_day": True,
+                "fills": report.model_dump(mode="json"),
+                "symbols": config.symbols,
+            }
+        )
+    )
 
 
 @app.command()
@@ -170,7 +196,7 @@ def finalize_command(ctx: typer.Context, date: DateOption = None) -> None:
     paths: Paths = ctx.obj.paths
     trade_date = date or today_ny()
     try:
-        decision_file = finalize(paths, config, trade_date)
+        decision_file = finalize(paths, config, trade_date, price=market.last_close)
     except FinalizeError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -211,3 +237,30 @@ def memory_settle_command(ctx: typer.Context, date: DateOption = None) -> None:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     typer.echo(json.dumps({"settled": [{"ticker": t, "date": d} for t, d in settled]}))
+
+
+state_app = typer.Typer(help="Per-symbol agent state: created once per symbol and day.")
+app.add_typer(state_app, name="state")
+
+
+@state_app.command("init")
+def state_init_command(ctx: typer.Context, symbol: SymbolArgument, date: DateOption = None) -> None:
+    """Create the day's state file for a symbol, seeded with the book, past lessons and identity."""
+    config: DeskConfig = ctx.obj.config
+    paths: Paths = ctx.obj.paths
+    trade_date = date or today_ny()
+    try:
+        init_state(
+            paths,
+            trade_date,
+            symbol,
+            portfolio_context=render_for_agents(load_book(paths, config), symbol),
+            past_context=past_context(paths, config, symbol, trade_date),
+            instrument_context=build_instrument_context(
+                symbol, "stock", resolve_instrument_identity(symbol), trade_date
+            ),
+        )
+    except (StateError, MemoryBridgeError) as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps({"ok": True, "symbol": symbol, "date": trade_date}))

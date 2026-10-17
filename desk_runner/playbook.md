@@ -8,9 +8,13 @@ about trades yourself: the commands and the upstream code decide.
 ## Rules
 
 - Run only `.venv/bin/ma ...` through Bash, and the sub-agents through the Agent tool.
+- You never answer a prompt yourself. Only sub-agents write answers.
+- No sub-agent spawns other sub-agents, and no sub-agent orchestrates. Each sub-agent answers one
+  prompt and stops.
 - Use `subagent_type: "general-purpose"` for every sub-agent. Set `model` from the prompt result
   (`model: "opus"` or `model: "sonnet"`). Memory reflections always use `model: "sonnet"`.
-- Each sub-agent gets a fresh spawn. Never reuse a sub-agent for a second turn.
+- Each sub-agent is a fresh spawn with `run_in_background: false`. Never reuse a sub-agent for a
+  second turn.
 - Never edit any file under `desk_runner/var/` by hand. Never edit state files.
 - Never use Alpaca, any broker tool, web search, or any other data source. Only `.venv/bin/ma`
   and the sub-agents.
@@ -29,12 +33,12 @@ about trades yourself: the commands and the upstream code decide.
 ## 2. Memory reflections
 
 1. Run `.venv/bin/ma memory pending`. Its output is `{"prompts": [...]}`.
-   - If it exits non-zero, run `.venv/bin/ma log "memory pending failed: <error>"`, skip to step 3.
-     This is not fatal.
-2. For each prompt path in `prompts`, spawn a sub-agent with `model: "sonnet"`, using the
-   wrapper from section "Sub-agent wrapper" with the "all other nodes" line. The answer path is
-   the prompt path with `.prompt.md` replaced by `.answer.md`. Spawn all reflections in one
-   message so they run in parallel.
+   - If it exits non-zero, run `.venv/bin/ma log "memory pending failed: <error>"` and skip to
+     step 3. This is not fatal.
+2. For each prompt path in `prompts`, spawn a sub-agent with `model: "sonnet"` and
+   `run_in_background: false`, using the wrapper with the "all other nodes" line. The answer path
+   is the prompt path with `.prompt.md` replaced by `.answer.md`. Spawn all reflections in ONE
+   message, one Agent call per prompt, so they return together.
 3. Run `.venv/bin/ma memory settle`.
    - If it exits non-zero, or a reflection answer is missing, run
      `.venv/bin/ma log "memory settle: <error or missing answer>"` and continue. This is not fatal.
@@ -42,51 +46,74 @@ about trades yourself: the commands and the upstream code decide.
 ## 3. Start each symbol
 
 For each symbol from step 1, run `.venv/bin/ma state init <SYMBOL>`.
-- If it exits non-zero, run `.venv/bin/ma log "state init failed for <SYMBOL>: <error>"` and drop
-  that symbol from the rest of the run. Finalize marks it for review.
+- If it exits non-zero, run `.venv/bin/ma log "state init failed for <SYMBOL>: <error>"` and leave
+  that symbol out of the rest of the run. Finalize marks it for review.
 
-## 4. Run the analysts and debates
+The symbols still running are the **active** symbols. Start with all symbols that passed state init.
 
-Process all symbols in parallel. Each symbol runs its own loop, and each loop is independent.
+## 4. Lockstep rounds
 
-For one symbol, repeat until `ma next` returns `"done": true`:
+All active symbols move together, one round at a time. A round has five phases. Do them in this
+order, and do not start the next phase until the current one is complete.
 
-1. Run `.venv/bin/ma next <SYMBOL>`. Its output is `{"nodes": [...], "done": bool}`.
-   - If it exits non-zero, log it and stop processing this symbol.
-   - If `done` is true, the symbol is finished. Leave the loop.
-2. For each node in `nodes`, run `.venv/bin/ma prompt <SYMBOL> <NODE>`. Its output is
-   `{"prompt_path": ..., "answer_path": ..., "model": ...}`.
-   - If it exits non-zero, log it and stop processing this symbol.
-3. Spawn one sub-agent per node with `model` set to the `model` from its prompt result. Use the
-   wrapper with the right line for the node (see "Which wrapper line"). When `nodes` has several
-   analysts (market, social, news, fundamentals), spawn them all in one message so they run in
-   parallel. Wait until every sub-agent of this step has finished.
-4. For each node, run `.venv/bin/ma apply <SYMBOL> <NODE>`.
-   - If it prints `{"ok": true, ...}`, log it with `.venv/bin/ma log "<SYMBOL> <NODE> applied"`.
-     Continue the loop.
-   - If it prints `{"ok": false, "error": "..."}` (exit 1), follow "Retry rule" below.
+**Phase A, next.** For each active symbol, run `.venv/bin/ma next <SYMBOL>`. Its output is
+`{"nodes": [...], "done": bool}`.
+- If `done` is true, the symbol is finished. Remove it from the active symbols.
+- If the command exits non-zero, log it with `ma log` and remove the symbol from the active symbols.
+- Otherwise keep the `nodes` for this round.
 
-### Retry rule
+If no active symbol has nodes left, go to section 5.
 
-1. On `ok: false`, spawn one more sub-agent for the same node with the same `prompt_path` and
-   `answer_path` and the same model. Use the same wrapper, and append the error text to it:
+**Phase B, prompt.** For every (symbol, node) pair returned in phase A, run
+`.venv/bin/ma prompt <SYMBOL> <NODE>`. Its output is `{"prompt_path": ..., "answer_path": ..., "model": ...}`.
+- If a prompt command exits non-zero, log it and remove that symbol from the active symbols. Drop
+  all its nodes from this round.
+
+**Phase C, spawn.** Spawn ALL sub-agents for this round in ONE message: one Agent call per
+(symbol, node) pair that passed phase B, each with `run_in_background: false`. Analysts of all
+symbols go in the same message, as do debaters and managers. Use the wrapper with the right line for
+the node (see "Which wrapper line") and set `model` from that node's prompt result. The message
+returns only when every sub-agent has finished.
+
+**Phase D, apply.** For each (symbol, node) pair from this round, run
+`.venv/bin/ma apply <SYMBOL> <NODE>`.
+- If it prints `{"ok": true, ...}`, run `.venv/bin/ma log "<SYMBOL> <NODE> applied"`.
+- If it prints `{"ok": false, ...}` (exit 1), add the pair and its error to the **retry list**.
+
+**Phase E, retry.** Only if the retry list is not empty:
+
+1. Spawn ALL retry sub-agents in ONE message, one Agent call per pair on the list, each with
+   `run_in_background: false`. Use the same `prompt_path`, `answer_path` and model as the first
+   attempt, and the same wrapper, with this line appended:
    `Your previous answer was rejected with this error: <error>. Answer again.`
-   Run `.venv/bin/ma log "<SYMBOL> <NODE> retry after error"` first.
-2. Run `.venv/bin/ma apply <SYMBOL> <NODE>` again.
-3. If it still fails, run `.venv/bin/ma apply <SYMBOL> <NODE> --freetext`.
-4. If that also fails, run `.venv/bin/ma log "<SYMBOL> <NODE> failed: <error>"`, stop processing
-   this symbol, and continue with the other symbols. Finalize marks this symbol for review.
+   Run `.venv/bin/ma log "<SYMBOL> <NODE> retry after error"` for each pair first.
+2. Run `.venv/bin/ma apply <SYMBOL> <NODE>` for each pair on the list.
+   - Pairs that now print `ok: true` are done.
+3. For each pair still failing, run `.venv/bin/ma apply <SYMBOL> <NODE> --freetext`.
+4. For each pair still failing after that, run
+   `.venv/bin/ma log "<SYMBOL> <NODE> failed: <error>"` and remove the symbol from the active symbols.
+   Its other pairs in this round were already applied and need no further action. Do not call
+   `ma next` for this symbol again. Finalize marks it for review.
+
+Then go back to phase A with the remaining active symbols.
+
+### Model choice
+
+`model` comes from the `ma prompt` output. It is `opus` for `research_manager` and
+`portfolio_manager`, and `sonnet` for every other node.
 
 ### Which wrapper line
 
-- For the analysts `market`, `news` and `fundamentals`, keep the line "only for analysts with
-  tools" and drop the "all other nodes" line.
+- For the analysts `market`, `news` and `fundamentals`, keep the sentence after the label
+  `{only for analysts with tools:}`, and delete the label and the other line.
 - For `social`, `bull`, `bear`, `research_manager`, `trader`, `aggressive`, `conservative`,
-  `neutral` and `portfolio_manager`, keep the "all other nodes" line and drop the other.
-- Reflections always use the "all other nodes" line.
+  `neutral` and `portfolio_manager`, keep the sentence after the label `{for all other nodes:}`,
+  and delete the label and the other line.
+- Reflections always use the `{for all other nodes:}` sentence.
 
-Model choice: `model` comes from the `ma prompt` output. It is `opus` for `research_manager` and
-`portfolio_manager`, and `sonnet` for every other node.
+The braces and label text are only instructions to you. Never send them to a sub-agent. Only the
+tools sentence needs `{symbol}` and `{node}`; the other sentences use only `{prompt_path}` and
+`{answer_path}`.
 
 ## 5. Finish
 
@@ -98,8 +125,10 @@ Model choice: `model` comes from the `ma prompt` output. It is `opus` for `resea
 
 ## Sub-agent wrapper
 
-Use this text for every sub-agent. Replace each `{placeholder}` with its value. Keep only one of the
-two conditional lines, as described in "Which wrapper line". Send it as the sub-agent's prompt.
+Use this text for every sub-agent. Replace each `{placeholder}` with its value, and follow "Which
+wrapper line" to keep only one of the two conditional sentences. Remove the labels in braces
+(`{only for analysts with tools:}` and `{for all other nodes:}`) before sending. Send the rest as the
+sub-agent's prompt.
 
 ```
 You are one agent in a trading research pipeline. Read the prompt in {prompt_path} and answer it exactly as that prompt asks.

@@ -21,6 +21,8 @@ REQUIRED_TEXT = [
     'model: "sonnet"',
     'model: "opus"',
     "## Sub-agent wrapper",
+    "run_in_background: false",
+    "ONE message",
 ]
 
 

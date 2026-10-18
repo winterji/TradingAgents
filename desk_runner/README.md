@@ -32,6 +32,7 @@ All commands are run as `.venv/bin/ma <command>` from the repository root. Each 
 | Command | Purpose |
 |---|---|
 | `ma init` | Check for a trading day, fill pending orders at the open, create the day's run directory. |
+| `ma init --ignore-calendar` | **Test runs only.** Skip the NYSE trading-day check. The daily run must never use this flag. |
 | `ma memory pending` | Write reflection prompts for settled past decisions. |
 | `ma memory settle` | Store the sub-agents' reflection answers. |
 | `ma state init <SYMBOL>` | Create the day's state for a symbol. |

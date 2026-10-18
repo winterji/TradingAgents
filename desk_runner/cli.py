@@ -59,12 +59,19 @@ def main(ctx: typer.Context) -> None:
 
 
 @app.command("init")
-def init_command(ctx: typer.Context, date: DateOption = None) -> None:
+def init_command(
+    ctx: typer.Context,
+    date: DateOption = None,
+    ignore_calendar: Annotated[
+        bool,
+        typer.Option("--ignore-calendar", help="Skip the NYSE trading-day check (test runs only)."),
+    ] = False,
+) -> None:
     """Fill the pending orders of earlier days at their open and start the day's run directory."""
     config: DeskConfig = ctx.obj.config
     paths: Paths = ctx.obj.paths
     trade_date = date or today_ny()
-    if not market.is_trading_day(trade_date):
+    if not ignore_calendar and not market.is_trading_day(trade_date):
         typer.echo(json.dumps({"trading_day": False}))
         return
     report = process_pending(paths, config, trade_date, market.open_on)
@@ -73,6 +80,7 @@ def init_command(ctx: typer.Context, date: DateOption = None) -> None:
         json.dumps(
             {
                 "trading_day": True,
+                "calendar_ignored": ignore_calendar,
                 "fills": report.model_dump(mode="json"),
                 "symbols": config.symbols,
             }

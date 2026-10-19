@@ -21,6 +21,8 @@ dependencies = [
     "pandas>=3.0.6",
     "python-dotenv>=1.0.0",
     "pytz>=2025.2",
+    "pyyaml>=6.0",
+    "exchange-calendars>=4.5",
     "questionary>=2.1.0",
     "requests>=2.32.4",
     "rich>=14.0.0",
@@ -44,16 +46,18 @@ bedrock = [
 
 [project.scripts]
 tradingagents = "cli.main:app"
+ma = "desk_runner.cli:app"
 
 [tool.setuptools.dynamic]
 version = {attr = "tradingagents.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "desk_runner*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]
 tradingagents = ["assets/*.svg"]
+desk_runner = ["config.yaml", "playbook.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

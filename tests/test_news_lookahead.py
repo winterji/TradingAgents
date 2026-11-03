@@ -116,6 +116,8 @@ def _ticker_with(articles, monkeypatch, search_news=(), search_quotes=("AAPL",))
             pass
 
         def get_news(self, count=20):
+            if isinstance(articles, Exception):
+                raise articles
             return articles
 
     searched = []
@@ -209,6 +211,20 @@ def test_an_empty_quote_feed_falls_back_to_the_articles_search_tags_with_the_sym
     out = ynews.get_news_yfinance("AAPL", today, today)
     assert searched == ["AAPL"]
     assert "ABOUT AAPL" in out and "ABOUT GIS" not in out
+
+
+@pytest.mark.unit
+def test_a_failing_quote_feed_falls_back_to_search(monkeypatch):
+    # Yahoo retired the quote-feed endpoint (404), which yfinance raises as
+    # "YAHOO! FINANCE IS CURRENTLY DOWN!" while search still answers.
+    from yfinance.exceptions import YFDataException
+
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    searched = _ticker_with(YFDataException("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***"),
+                            monkeypatch, search_news=[_tagged("ABOUT AAPL", today, "AAPL")])
+    out = ynews.get_news_yfinance("AAPL", today, today)
+    assert searched == ["AAPL"]
+    assert "ABOUT AAPL" in out
 
 
 @pytest.mark.unit

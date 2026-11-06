@@ -164,6 +164,7 @@ def build_default_config() -> dict:
             "news_data": "yfinance",             # Options: alpha_vantage, yfinance
             "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
             "prediction_markets": "polymarket",  # Options: polymarket (keyless)
+            "rate_expectations": "yfinance",     # Options: yfinance (Fed funds futures)
         },
         # Tool-level configuration (takes precedence over category-level)
         "tool_vendors": {

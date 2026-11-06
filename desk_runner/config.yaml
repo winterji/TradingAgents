@@ -1,4 +1,4 @@
-symbols: [AAPL, GOOGL, AMZN]
+symbols: [HPQ]
 max_debate_rounds: 3
 max_risk_discuss_rounds: 3
 max_tool_rounds: 20

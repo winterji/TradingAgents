@@ -289,3 +289,26 @@ def get_prediction_markets(
         str: A formatted markdown report of matching prediction markets
     """
     return route_to_vendor("get_prediction_markets", topic, limit, trade_date or None)
+
+
+@tool
+def get_fed_rate_expectations(
+    months: Annotated[
+        int | None, "Contract months to read, starting with the current one; omit for 12"
+    ] = None,
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """
+    Retrieve the Fed funds rate path priced by 30-day Fed funds futures (CBOT
+    ZQ contracts): the real-money market behind CME FedWatch's cut/hike odds.
+    Returns each month's implied average rate and its change against the
+    current month, in basis points and in 25bp moves, with traded volume.
+    Uses the configured rate_expectations vendor.
+
+    Args:
+        months (int): Contract months to read; omit for 12
+
+    Returns:
+        str: A formatted markdown table of the implied policy path
+    """
+    return route_to_vendor("get_fed_rate_expectations", trade_date or None, months)
